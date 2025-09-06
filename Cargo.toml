@@ -1,0 +1,10 @@
+[package]
+name = "unzipper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+notify = "5.0.0"
+walkdir = "2.3.2"
+zip = "0.6.2"
+clap = { version = "4.5.4", features = ["derive"] }
