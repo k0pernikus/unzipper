@@ -58,7 +58,7 @@ Options:
 ```
 
 ```
-PS C:\Users\Philipp\foo> .\unzipper.exe
+$> .\unzipper.exe
 [Main] Target directory set to: C:\Users\Philipp\Downloads
 [Worker 0] Starting up.
 [Main] Checking for existing archives in C:\Users\Philipp\Downloads...
