@@ -3,7 +3,7 @@ use notify::{EventKind, RecursiveMode, Result, Watcher};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use walkdir::WalkDir;
 
@@ -35,27 +35,52 @@ pub(crate) fn wait_until_stable(path: &Path, attempts: usize, delay: std::time::
     Ok(())
 }
 
-fn next_available_dir(base: PathBuf) -> PathBuf {
-    if !base.exists() {
-        return base;
-    }
-    let parent = base.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(""));
-    let name = base.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    for i in 1..1000 {
-        let candidate = parent.join(format!("{} ({:03})", name, i));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    let candidate = parent.join(format!("{} (overflow)", name));
-    candidate
-}
 
 pub(crate) fn build_dest_dir_with_extension(path: &Path) -> PathBuf {
     let parent_dir = path.parent().unwrap_or_else(|| Path::new(""));
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let sanitized: String = file_name.chars().filter(|c| !"<>:\"/\\|?*".contains(*c)).collect();
-    next_available_dir(parent_dir.join(sanitized))
+    parent_dir.join(sanitized)
+}
+
+// Ensures the destination directory for extraction is available.
+// If the archive file itself would conflict with the destination directory name
+// (e.g., C:\path\file.zip and dest dir C:\path\file.zip), temporarily rename
+// the archive, create the directory, and return the temp path to optionally
+// restore later.
+pub(crate) fn prepare_dest_dir(path: &Path) -> io::Result<(PathBuf, Option<PathBuf>)> {
+    let dest_dir = build_dest_dir_with_extension(path);
+
+    // If the destination directory already exists, we're fine.
+    if dest_dir.is_dir() {
+        return Ok((dest_dir, None));
+    }
+
+    // If a file exists at the dest path (likely the archive), we need to move it.
+    if dest_dir.exists() {
+        // Compute a temporary name for the archive file in the same directory.
+        let mut tmp_name = dest_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{}.__extracting__", s))
+            .unwrap_or_else(|| String::from("__extracting__"));
+        // Avoid collisions
+        let mut tmp_path = dest_dir.parent().unwrap_or_else(|| Path::new("")) .join(&tmp_name);
+        let mut counter = 1;
+        while tmp_path.exists() {
+            tmp_name = format!("{}.__extracting__{}", dest_dir.file_name().and_then(|s| s.to_str()).unwrap_or("archive"), counter);
+            tmp_path = dest_dir.parent().unwrap_or_else(|| Path::new("")) .join(&tmp_name);
+            counter += 1;
+        }
+        // Move the archive away, create the dir, and return the temp path.
+        fs::rename(path, &tmp_path)?;
+        fs::create_dir_all(&dest_dir)?;
+        return Ok((dest_dir, Some(tmp_path)));
+    }
+
+    // Normal case: create the destination directory.
+    fs::create_dir_all(&dest_dir)?;
+    Ok((dest_dir, None))
 }
 
 fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
@@ -114,12 +139,39 @@ fn process_file(path: &Path, worker_id: usize) {
         _ => return,
     }
 
-    if let Err(e) = fs::remove_file(path) {
-        eprintln!("[Worker {}] Error deleting {}: {}", worker_id, path.display(), e);
-        return;
+    // Attempt to delete the original archive. In our extraction flow, we may have
+    // temporarily renamed the archive to free the destination directory path.
+    // If the original file path is gone or blocked by a directory, try to clean
+    // up any temp "__extracting__" files we might have created.
+    match fs::remove_file(path) {
+        Ok(_) => {
+            println!("[Worker {}] Successfully deleted original archive: {}", worker_id, path.display());
+        }
+        Err(e) => {
+            use std::io::ErrorKind;
+            // NotFound: file may have been moved to a temp name.
+            // PermissionDenied: the path may now be a directory; we still want to remove temp.
+            if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::PermissionDenied {
+                if let Some(parent) = path.parent() {
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                        let prefix = format!("{}.__extracting__", name);
+                        if let Ok(entries) = fs::read_dir(parent) {
+                            for entry in entries.flatten() {
+                                if let Some(fname) = entry.file_name().to_str() {
+                                    if fname.starts_with(&prefix) {
+                                        let _ = fs::remove_file(entry.path());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("[Worker {}] Original archive already moved/absent. Clean-up complete for {}.", worker_id, path.display());
+            } else {
+                eprintln!("[Worker {}] Error deleting {}: {}", worker_id, path.display(), e);
+            }
+        }
     }
-
-    println!("[Worker {}] Successfully deleted original archive: {}", worker_id, path.display());
 }
 
 fn untar_or_gz(path: &Path, worker_id: usize) -> io::Result<()> {
@@ -202,7 +254,7 @@ mod tests {
         let td = temp_dir();
         let zip_path = create_sample_zip(&td);
         process_file(&zip_path, 1);
-        assert!(!zip_path.exists());
+        assert!(!zip_path.is_file());
         let extracted_dir = td.join("sample.zip");
         assert!(extracted_dir.exists());
         let inner = extracted_dir.join("inner.txt");
@@ -305,12 +357,20 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<PathBuf>();
     let rx = Arc::new(Mutex::new(rx));
 
+    // Shutdown flag
+    let shutting_down = Arc::new(AtomicBool::new(false));
+
     const NUM_WORKERS: usize = 4;
     for i in 0..NUM_WORKERS {
         let worker_rx = Arc::clone(&rx);
+        let sd = Arc::clone(&shutting_down);
         thread::spawn(move || {
             println!("[Worker {}] Starting up.", i);
             loop {
+                if sd.load(Ordering::SeqCst) {
+                    println!("[Worker {}] Shutdown flag set. Exiting.", i);
+                    break;
+                }
                 let path_result = worker_rx.lock().unwrap().recv();
                 match path_result {
                     Ok(path) => process_file(&path, i),
@@ -340,34 +400,60 @@ fn main() -> Result<()> {
     }
 
     let watcher_tx = tx.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-        Ok(event) => match event.kind {
-            EventKind::Create(_) | EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                for path in event.paths {
-                    if path.is_file() {
-                        if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
-                            match ext.as_str() {
-                                "zip" | "rar" | "7z" | "tar" | "gz" => {
-                                    println!("[Main] Detected file event for: {}. Sending to worker.", path.display());
-                                    watcher_tx.send(path).expect("Failed to send path to worker thread");
+    let sd_cb = Arc::clone(&shutting_down);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if sd_cb.load(Ordering::SeqCst) {
+            return; // ignore events during shutdown
+        }
+        match res {
+            Ok(event) => match event.kind {
+                EventKind::Create(_) | EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                    for path in event.paths {
+                        if path.is_file() {
+                            if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+                                match ext.as_str() {
+                                    "zip" | "rar" | "7z" | "tar" | "gz" => {
+                                        println!("[Main] Detected file event for: {}. Sending to worker.", path.display());
+                                        watcher_tx.send(path).expect("Failed to send path to worker thread");
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
                 }
-            }
-            _ => (),
-        },
-        Err(e) => eprintln!("[Main] Watch error: {:?}", e),
+                _ => (),
+            },
+            Err(e) => eprintln!("[Main] Watch error: {:?}", e),
+        }
     })?;
 
     println!("[Main] Watching directory: {} for new archives...", dir_to_watch.display());
     watcher.watch(&dir_to_watch, RecursiveMode::NonRecursive)?;
 
+    // Install Ctrl+C handler to initiate graceful shutdown
+    let sd_sig = Arc::clone(&shutting_down);
+    ctrlc::set_handler(move || {
+        if !sd_sig.swap(true, Ordering::SeqCst) {
+            eprintln!("\n[Main] Ctrl+C received. Shutting down gracefully...");
+        }
+    }).expect("Error setting Ctrl+C handler");
+
     drop(tx);
 
-    loop {
-        thread::park();
+    // Wait until shutdown flag is set
+    while !shutting_down.load(Ordering::SeqCst) {
+        thread::park_timeout(std::time::Duration::from_millis(200));
     }
+
+    // Drop watcher to stop OS handles and callbacks
+    drop(watcher);
+
+    // Unpark workers so they can observe shutdown and exit
+    // Dropping the channel sender already causes recv() to return Err
+    // Give a brief moment for threads to unwind and release resources
+    thread::sleep(std::time::Duration::from_millis(200));
+
+    println!("[Main] Shutdown complete.");
+    Ok(())
 }

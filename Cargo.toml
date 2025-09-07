@@ -11,3 +11,4 @@ clap = { version = "4.5.4", features = ["derive"] }
 tar = "0.4"
 flate2 = "1.0"
 sevenz-rust = "0.5"
+ctrlc = "3"
