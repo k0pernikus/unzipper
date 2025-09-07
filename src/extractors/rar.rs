@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
-use crate::extractors::ArchiveExtractor;
+use crate::extractors::{ArchiveExtractor, log_start, log_done, log_error_status, log_error_launch};
 
 pub struct RarExtractor;
 
@@ -10,6 +10,7 @@ impl ArchiveExtractor for RarExtractor {
     fn extract(&self, path: &Path, worker_id: usize) -> io::Result<()> {
         let (dest_dir, temp_renamed) = crate::prepare_dest_dir(path)?;
         let archive_arg: &Path = temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(path);
+        log_start(worker_id, path, &dest_dir, "rar");
         let output = Command::new("7z")
             .arg("x")
             .arg("-y")
@@ -18,15 +19,15 @@ impl ArchiveExtractor for RarExtractor {
             .output();
         match output {
             Ok(out) if out.status.success() => {
-                println!("[Worker {}] Extracted rar {} via 7z", worker_id, path.display());
+                log_done(worker_id, path, "rar");
                 Ok(())
             }
             Ok(out) => {
-                eprintln!("[Worker {}] 7z failed for {}: exit {}", worker_id, path.display(), out.status);
+                log_error_status(worker_id, path, "7z", &out.status);
                 Err(io::Error::new(io::ErrorKind::Other, "7z extraction failed"))
             }
             Err(e) => {
-                eprintln!("[Worker {}] 7z not available or failed to launch: {}", worker_id, e);
+                log_error_launch(worker_id, "7z", &e);
                 Err(e)
             }
         }

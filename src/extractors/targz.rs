@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use tar::Archive as TarArchive;
 
-use crate::extractors::ArchiveExtractor;
+use crate::extractors::{ArchiveExtractor, log_start, log_done};
 
 pub struct TarGzExtractor;
 
@@ -12,6 +12,7 @@ impl ArchiveExtractor for TarGzExtractor {
     fn extract(&self, path: &Path, worker_id: usize) -> io::Result<()> {
         let (dest_dir, temp_renamed) = crate::prepare_dest_dir(path)?;
         let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        log_start(worker_id, path, &dest_dir, "tar/gz");
         {
             let file = fs::File::open(temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(path))?;
             if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") || file_name.ends_with(".taz") {
@@ -29,7 +30,7 @@ impl ArchiveExtractor for TarGzExtractor {
                 io::copy(&mut gz, &mut out)?;
             }
         }
-        println!("[Worker {}] Extracted tar/gz {}", worker_id, path.display());
+        log_done(worker_id, path, "tar/gz");
         Ok(())
     }
 }

@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::extractors::ArchiveExtractor;
+use crate::extractors::{ArchiveExtractor, log_extracting, log_start, log_done};
 
 pub struct SevenZExtractor;
 
@@ -10,6 +10,7 @@ impl ArchiveExtractor for SevenZExtractor {
     fn extract(&self, path: &Path, worker_id: usize) -> io::Result<()> {
         let (dest_dir, temp_renamed) = crate::prepare_dest_dir(path)?;
         crate::wait_until_stable(path, 5, std::time::Duration::from_millis(300))?;
+        log_start(worker_id, path, &dest_dir, "7z");
         {
             let mut sz = sevenz_rust::SevenZReader::open(
                 temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(path),
@@ -24,6 +25,7 @@ impl ArchiveExtractor for SevenZExtractor {
                     let _ = fs::create_dir_all(&out);
                     return Ok(true);
                 }
+                log_extracting(worker_id, name);
                 if let Some(p) = out.parent() { let _ = fs::create_dir_all(p); }
                 if out.exists() {
                     if let Ok(perms) = fs::metadata(&out).and_then(|m| Ok(m.permissions())) {
@@ -40,7 +42,7 @@ impl ArchiveExtractor for SevenZExtractor {
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         }
-        println!("[Worker {}] Extracted 7z {}", worker_id, path.display());
+        log_done(worker_id, path, "7z");
         Ok(())
     }
 }

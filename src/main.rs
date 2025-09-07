@@ -43,28 +43,19 @@ pub(crate) fn build_dest_dir_with_extension(path: &Path) -> PathBuf {
     parent_dir.join(sanitized)
 }
 
-// Ensures the destination directory for extraction is available.
-// If the archive file itself would conflict with the destination directory name
-// (e.g., C:\path\file.zip and dest dir C:\path\file.zip), temporarily rename
-// the archive, create the directory, and return the temp path to optionally
-// restore later.
 pub(crate) fn prepare_dest_dir(path: &Path) -> io::Result<(PathBuf, Option<PathBuf>)> {
     let dest_dir = build_dest_dir_with_extension(path);
 
-    // If the destination directory already exists, we're fine.
     if dest_dir.is_dir() {
         return Ok((dest_dir, None));
     }
 
-    // If a file exists at the dest path (likely the archive), we need to move it.
     if dest_dir.exists() {
-        // Compute a temporary name for the archive file in the same directory.
         let mut tmp_name = dest_dir
             .file_name()
             .and_then(|s| s.to_str())
             .map(|s| format!("{}.__extracting__", s))
             .unwrap_or_else(|| String::from("__extracting__"));
-        // Avoid collisions
         let mut tmp_path = dest_dir.parent().unwrap_or_else(|| Path::new("")) .join(&tmp_name);
         let mut counter = 1;
         while tmp_path.exists() {
@@ -72,21 +63,15 @@ pub(crate) fn prepare_dest_dir(path: &Path) -> io::Result<(PathBuf, Option<PathB
             tmp_path = dest_dir.parent().unwrap_or_else(|| Path::new("")) .join(&tmp_name);
             counter += 1;
         }
-        // Move the archive away, create the dir, and return the temp path.
         fs::rename(path, &tmp_path)?;
         fs::create_dir_all(&dest_dir)?;
         return Ok((dest_dir, Some(tmp_path)));
     }
 
-    // Normal case: create the destination directory.
     fs::create_dir_all(&dest_dir)?;
     Ok((dest_dir, None))
 }
 
-fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
-    use crate::extractors::{zip::ZipExtractor, ArchiveExtractor};
-    ZipExtractor.extract(zip_path, worker_id)
-}
 
 fn is_temp_file_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -107,50 +92,27 @@ fn process_file(path: &Path, worker_id: usize) {
         None => return
     };
 
-    match ext.as_str() {
-        "zip" => {
-            println!("[Worker {}] Processing zip file: {}", worker_id, path.display());
-            if let Err(e) = unzip_file(path, worker_id) {
-                eprintln!("[Worker {}] Error unzipping {}: {}", worker_id, path.display(), e);
-                return;
-            }
-        }
-        "tar" | "tgz" | "gz" | "tar.gz" | "taz" => {
-            println!("[Worker {}] Processing tar/gz file: {}", worker_id, path.display());
-            if let Err(e) = untar_or_gz(path, worker_id) {
-                eprintln!("[Worker {}] Error extracting {}: {}", worker_id, path.display(), e);
-                return;
-            }
-        }
-        "7z" => {
-            println!("[Worker {}] Processing 7z file: {}", worker_id, path.display());
-            if let Err(e) = extract_7z(path, worker_id) {
-                eprintln!("[Worker {}] Error extracting {}: {}", worker_id, path.display(), e);
-                return;
-            }
-        }
-        "rar" => {
-            println!("[Worker {}] Processing rar file: {}", worker_id, path.display());
-            if let Err(e) = extract_rar(path, worker_id) {
-                eprintln!("[Worker {}] Error extracting {}: {}", worker_id, path.display(), e);
-                return;
-            }
-        }
-        _ => return,
+    use crate::extractors::ArchiveExtractor;
+    let extractor: Option<Box<dyn ArchiveExtractor>> = match ext.as_str() {
+        "zip" => Some(Box::new(crate::extractors::zip::ZipExtractor)),
+        "tar" | "tgz" | "gz" | "tar.gz" | "taz" => Some(Box::new(crate::extractors::targz::TarGzExtractor)),
+        "7z" => Some(Box::new(crate::extractors::sevenz::SevenZExtractor)),
+        "rar" => Some(Box::new(crate::extractors::rar::RarExtractor)),
+        _ => None,
+    };
+    let Some(extractor) = extractor else { return };
+    println!("[Worker {}] Processing {} file: {}", worker_id, ext, path.display());
+    if let Err(e) = extractor.extract(path, worker_id) {
+        eprintln!("[Worker {}] Error extracting {}: {}", worker_id, path.display(), e);
+        return;
     }
 
-    // Attempt to delete the original archive. In our extraction flow, we may have
-    // temporarily renamed the archive to free the destination directory path.
-    // If the original file path is gone or blocked by a directory, try to clean
-    // up any temp "__extracting__" files we might have created.
     match fs::remove_file(path) {
         Ok(_) => {
             println!("[Worker {}] Successfully deleted original archive: {}", worker_id, path.display());
         }
         Err(e) => {
             use std::io::ErrorKind;
-            // NotFound: file may have been moved to a temp name.
-            // PermissionDenied: the path may now be a directory; we still want to remove temp.
             if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::PermissionDenied {
                 if let Some(parent) = path.parent() {
                     if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
@@ -174,20 +136,6 @@ fn process_file(path: &Path, worker_id: usize) {
     }
 }
 
-fn untar_or_gz(path: &Path, worker_id: usize) -> io::Result<()> {
-    use crate::extractors::{targz::TarGzExtractor, ArchiveExtractor};
-    TarGzExtractor.extract(path, worker_id)
-}
-
-fn extract_7z(path: &Path, worker_id: usize) -> io::Result<()> {
-    use crate::extractors::{sevenz::SevenZExtractor, ArchiveExtractor};
-    SevenZExtractor.extract(path, worker_id)
-}
-
-fn extract_rar(path: &Path, worker_id: usize) -> io::Result<()> {
-    use crate::extractors::{rar::RarExtractor, ArchiveExtractor};
-    RarExtractor.extract(path, worker_id)
-}
 
 #[cfg(test)]
 mod tests {
@@ -238,9 +186,10 @@ mod tests {
 
     #[test]
     fn test_unzip_file_extracts() {
+        use crate::extractors::{ArchiveExtractor, zip::ZipExtractor};
         let td = temp_dir();
         let zip_path = create_sample_zip(&td);
-        let res = unzip_file(&zip_path, 0);
+        let res = ZipExtractor.extract(&zip_path, 0);
         assert!(res.is_ok());
         let extracted_dir = td.join("sample.zip");
         assert!(extracted_dir.exists());
@@ -264,6 +213,7 @@ mod tests {
 
     #[test]
     fn test_untar_or_gz_handles_tar() {
+        use crate::extractors::{ArchiveExtractor, targz::TarGzExtractor};
         let td = temp_dir();
         let tar_path = td.join("archive.tar");
         let file_in = td.join("f.txt");
@@ -272,7 +222,7 @@ mod tests {
         let mut builder = tar::Builder::new(tar_file);
         builder.append_path_with_name(&file_in, "f.txt").unwrap();
         builder.finish().unwrap();
-        let res = untar_or_gz(&tar_path, 2);
+        let res = TarGzExtractor.extract(&tar_path, 2);
         assert!(res.is_ok());
         let out_dir = td.join("archive.tar");
         assert_eq!(std::fs::read_to_string(out_dir.join("f.txt")).unwrap(), "abc");
@@ -281,6 +231,7 @@ mod tests {
 
     #[test]
     fn test_untar_or_gz_handles_tar_gz() {
+        use crate::extractors::{ArchiveExtractor, targz::TarGzExtractor};
         let td = temp_dir();
         let tar_gz_path = td.join("pkg.tar.gz");
         let mut tar_buf = Vec::new();
@@ -303,7 +254,7 @@ mod tests {
             enc.write_all(&tar_buf).unwrap();
             enc.finish().unwrap();
         }
-        let res = untar_or_gz(&tar_gz_path, 3);
+        let res = TarGzExtractor.extract(&tar_gz_path, 3);
         assert!(res.is_ok());
         let out_dir = td.join("pkg.tar.gz");
         assert_eq!(std::fs::read_to_string(out_dir.join("a.txt")).unwrap(), "hello tgz");
@@ -312,6 +263,7 @@ mod tests {
 
     #[test]
     fn test_untar_or_gz_handles_gz_single_file() {
+        use crate::extractors::{ArchiveExtractor, targz::TarGzExtractor};
         let td = temp_dir();
         let gz_path = td.join("doc.gz");
         let content = b"just gz";
@@ -323,7 +275,7 @@ mod tests {
             enc.write_all(content).unwrap();
             enc.finish().unwrap();
         }
-        let res = untar_or_gz(&gz_path, 4);
+        let res = TarGzExtractor.extract(&gz_path, 4);
         assert!(res.is_ok());
         let out_dir = td.join("doc.gz");
         let out_file = out_dir.join("doc");
@@ -357,7 +309,6 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<PathBuf>();
     let rx = Arc::new(Mutex::new(rx));
 
-    // Shutdown flag
     let shutting_down = Arc::new(AtomicBool::new(false));
 
     const NUM_WORKERS: usize = 4;
@@ -403,7 +354,7 @@ fn main() -> Result<()> {
     let sd_cb = Arc::clone(&shutting_down);
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if sd_cb.load(Ordering::SeqCst) {
-            return; // ignore events during shutdown
+            return;
         }
         match res {
             Ok(event) => match event.kind {
@@ -431,7 +382,6 @@ fn main() -> Result<()> {
     println!("[Main] Watching directory: {} for new archives...", dir_to_watch.display());
     watcher.watch(&dir_to_watch, RecursiveMode::NonRecursive)?;
 
-    // Install Ctrl+C handler to initiate graceful shutdown
     let sd_sig = Arc::clone(&shutting_down);
     ctrlc::set_handler(move || {
         if !sd_sig.swap(true, Ordering::SeqCst) {
@@ -441,17 +391,12 @@ fn main() -> Result<()> {
 
     drop(tx);
 
-    // Wait until shutdown flag is set
     while !shutting_down.load(Ordering::SeqCst) {
         thread::park_timeout(std::time::Duration::from_millis(200));
     }
 
-    // Drop watcher to stop OS handles and callbacks
     drop(watcher);
 
-    // Unpark workers so they can observe shutdown and exit
-    // Dropping the channel sender already causes recv() to return Err
-    // Give a brief moment for threads to unwind and release resources
     thread::sleep(std::time::Duration::from_millis(200));
 
     println!("[Main] Shutdown complete.");
