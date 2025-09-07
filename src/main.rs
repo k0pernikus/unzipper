@@ -18,6 +18,52 @@ struct Args {
     watch_path: Option<PathBuf>,
 }
 
+// Cross-platform default downloads directory resolution
+fn default_downloads_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let home = env::var("USERPROFILE").unwrap_or_else(|_| String::from("."));
+        return Path::new(&home).join("Downloads");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = env::var("HOME").unwrap_or_else(|_| String::from("."));
+        return Path::new(&home).join("Downloads");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return linux_downloads_dir();
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_downloads_dir() -> PathBuf {
+    // Try to read the XDG user dirs configuration: ~/.config/user-dirs.dirs
+    let home = env::var("HOME").unwrap_or_else(|_| String::from("."));
+    let config_path = Path::new(&home).join(".config").join("user-dirs.dirs");
+
+    if let Ok(contents) = fs::read_to_string(&config_path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.starts_with("XDG_DOWNLOAD_DIR") {
+                if let Some(eq_idx) = line.find('=') {
+                    let mut value = line[eq_idx + 1..].trim().trim_matches('"').to_string();
+                    // Expand $HOME variable if present
+                    if value.contains("$HOME") {
+                        value = value.replace("$HOME", &home);
+                    }
+                    let path = PathBuf::from(value);
+                    return path;
+                }
+            }
+        }
+    }
+
+    // Fallback to ~/Downloads
+    Path::new(&home).join("Downloads")
+}
 
 fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
     let parent_dir = zip_path.parent().unwrap_or_else(|| Path::new(""));
@@ -25,7 +71,7 @@ fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
     let sanitized_stem: String = file_stem.chars().filter(|c| !"<>:\"/\\|?*".contains(*c)).collect();
     let dest_dir = parent_dir.join(sanitized_stem);
 
-    println!("[Worker {}] Unzipping file: {:?} to {:?}", worker_id, zip_path, dest_dir);
+    println!("[Worker {}] Unzipping file: {} to {}", worker_id, zip_path.display(), dest_dir.display());
 
     fs::create_dir_all(&dest_dir)?;
 
@@ -56,7 +102,7 @@ fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
         io::copy(&mut file, &mut outfile)?;
     }
 
-    println!("[Worker {}] Successfully unzipped {:?}", worker_id, zip_path);
+    println!("[Worker {}] Successfully unzipped {}", worker_id, zip_path.display());
     Ok(())
 }
 
@@ -65,35 +111,28 @@ fn process_file(path: &Path, worker_id: usize) {
         return;
     }
 
-    println!("[Worker {}] Processing new zip file: {:?}", worker_id, path);
+    println!("[Worker {}] Processing new zip file: {}", worker_id, path.display());
 
     if let Err(e) = unzip_file(path, worker_id) {
-        eprintln!("[Worker {}] Error unzipping {:?}: {}", worker_id, path, e);
+        eprintln!("[Worker {}] Error unzipping {}: {}", worker_id, path.display(), e);
         return;
     }
 
     if let Err(e) = fs::remove_file(path) {
-        eprintln!("[Worker {}] Error deleting {:?}: {}", worker_id, path, e);
+        eprintln!("[Worker {}] Error deleting {}: {}", worker_id, path.display(), e);
         return;
     }
 
-    println!("[Worker {}] Successfully deleted original zip file: {:?}", worker_id, path);
+    println!("[Worker {}] Successfully deleted original zip file: {}", worker_id, path.display());
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Use the provided watch_path, or default to the Downloads folder.
-    let dir_to_watch = match args.watch_path {
-        Some(path) => path,
-        None => {
-            let home_path = env::var("USERPROFILE")
-                .expect("USERPROFILE env var not found. Please provide a path with -p.");
-            Path::new(&home_path).join("Downloads")
-        }
-    };
+    // Use the provided watch_path, or default to the OS-appropriate Downloads folder.
+    let dir_to_watch = args.watch_path.unwrap_or_else(|| default_downloads_dir());
 
-    println!("[Main] Target directory set to: {:?}", dir_to_watch);
+    println!("[Main] Target directory set to: {}", dir_to_watch.display());
     if !dir_to_watch.exists() {
         eprintln!("[Main] Error: Watch directory does not exist.");
         return Ok(()); // Exit gracefully
@@ -121,11 +160,11 @@ fn main() -> Result<()> {
         });
     }
 
-    println!("[Main] Checking for existing zip files in {:?}...", dir_to_watch);
+    println!("[Main] Checking for existing zip files in {}...", dir_to_watch.display());
     for entry in WalkDir::new(&dir_to_watch).max_depth(1).into_iter().filter_map(std::result::Result::ok) {
         let path = entry.path();
         if path.is_file() && path.extension().map_or(false, |ext| ext == "zip") {
-            println!("[Main] Found existing zip file: {:?}. Sending to worker.", path);
+            println!("[Main] Found existing zip file: {}. Sending to worker.", path.display());
             tx.send(path.to_path_buf()).expect("Failed to send path to worker thread");
         }
     }
@@ -136,7 +175,7 @@ fn main() -> Result<()> {
             EventKind::Create(_) | EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
                 for path in event.paths {
                     if path.is_file() {
-                        println!("[Main] Detected file event for: {:?}. Sending to worker.", path);
+                        println!("[Main] Detected file event for: {}. Sending to worker.", path.display());
                         watcher_tx.send(path).expect("Failed to send path to worker thread");
                     }
                 }
@@ -146,7 +185,7 @@ fn main() -> Result<()> {
         Err(e) => eprintln!("[Main] Watch error: {:?}", e),
     })?;
 
-    println!("[Main] Watching directory: {:?} for new zip files...", dir_to_watch);
+    println!("[Main] Watching directory: {} for new zip files...", dir_to_watch.display());
     watcher.watch(&dir_to_watch, RecursiveMode::NonRecursive)?;
 
     drop(tx);
