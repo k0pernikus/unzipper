@@ -21,7 +21,7 @@ It only watches the folder itself, it doesn't watch them recursively.
 
 ## Example
 
-NOTE: I am not affiliated with [getsamplefiles.com](getsamplefiles.com)
+NOTE: I am not affiliated with [getsamplefiles.com](https://getsamplefiles.com/)
 Use them and their sample files at your own risk.
 
 Assuming you are on Windows 11 and your browser stores downloaded files in:
