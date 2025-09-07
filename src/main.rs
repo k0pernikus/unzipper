@@ -7,62 +7,14 @@ use zip::ZipArchive;
 use walkdir::WalkDir;
 use std::thread;
 use std::sync::{mpsc, Arc, Mutex};
-use std::env;
 
-/// A background utility to automatically unzip archives in a directory.
+mod platform;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// The path to the directory to watch. Defaults to the user's Downloads folder.
     #[arg(short = 'p', long)]
     watch_path: Option<PathBuf>,
-}
-
-// Cross-platform default downloads directory resolution
-fn default_downloads_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        let home = env::var("USERPROFILE").unwrap_or_else(|_| String::from("."));
-        return Path::new(&home).join("Downloads");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = env::var("HOME").unwrap_or_else(|_| String::from("."));
-        return Path::new(&home).join("Downloads");
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        return linux_downloads_dir();
-    }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_downloads_dir() -> PathBuf {
-    // Try to read the XDG user dirs configuration: ~/.config/user-dirs.dirs
-    let home = env::var("HOME").unwrap_or_else(|_| String::from("."));
-    let config_path = Path::new(&home).join(".config").join("user-dirs.dirs");
-
-    if let Ok(contents) = fs::read_to_string(&config_path) {
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.starts_with("XDG_DOWNLOAD_DIR") {
-                if let Some(eq_idx) = line.find('=') {
-                    let mut value = line[eq_idx + 1..].trim().trim_matches('"').to_string();
-                    // Expand $HOME variable if present
-                    if value.contains("$HOME") {
-                        value = value.replace("$HOME", &home);
-                    }
-                    let path = PathBuf::from(value);
-                    return path;
-                }
-            }
-        }
-    }
-
-    // Fallback to ~/Downloads
-    Path::new(&home).join("Downloads")
 }
 
 fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
@@ -129,13 +81,12 @@ fn process_file(path: &Path, worker_id: usize) {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Use the provided watch_path, or default to the OS-appropriate Downloads folder.
-    let dir_to_watch = args.watch_path.unwrap_or_else(|| default_downloads_dir());
+    let dir_to_watch = args.watch_path.unwrap_or_else(|| platform::default_downloads_dir());
 
     println!("[Main] Target directory set to: {}", dir_to_watch.display());
     if !dir_to_watch.exists() {
         eprintln!("[Main] Error: Watch directory does not exist.");
-        return Ok(()); // Exit gracefully
+        return Ok(())
     }
 
 
