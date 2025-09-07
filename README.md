@@ -18,7 +18,7 @@ Defaults to the download folder as defined by the user. Can be overwritten with 
 
 It only watches the folder itself, it doesn't watch them recursivly.
 
-#Example
+## Example
 
 NOTE: I am not affiliated with getsamplefiles.com
 Use them and their sample files at your own risk.
