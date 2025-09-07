@@ -2,7 +2,8 @@
 
 ## Why
 
-I often download zip files, and manually extracting them became tedious. Esp. double checking if I could delete the zip file or if I already had extracted it.
+I often download zip files, and manually extracting them became tedious. Esp. double checking if I could delete the zip
+file or if I already had extracted it.
 
 Hence: unzipper.
 
@@ -16,11 +17,11 @@ After extraction, it deletes the archive files.
 
 Defaults to the download folder as defined by the user. Can be overwritten with option in the command.
 
-It only watches the folder itself, it doesn't watch them recursivly.
+It only watches the folder itself, it doesn't watch them recursively.
 
 ## Example
 
-NOTE: I am not affiliated with getsamplefiles.com
+NOTE: I am not affiliated with [getsamplefiles.com](getsamplefiles.com)
 Use them and their sample files at your own risk.
 
 Assuming you are on Windows 11 and your browser stores downloaded files in:
@@ -35,15 +36,16 @@ it will be saved at:
 
 `%USERPROFILE%\Downloads\sample-1.zip`
 
-Directly after, it will be extraced under:
+Directly after, it will be extracted under:
 
 `C:\Users\Philipp\Downloads\sample-1.zip (001)`
 
-As in: The filename will become the directory name, and a numeric suffic `(xxx)` will be added. This is to ensure that even if you download a file of the same name again, it will get extracted into its own target directory.
+As in: The filename will become the directory name, and a numeric suffix `(xxx)` will be added. This is to ensure that
+even if you download a file of the same name again, it will get extracted into its own target directory.
 
 ### OS
 
-Should work on all OS, yet was only tested on Windows 11 as of yet.
+Should work on all OS, yet was only tested on Windows 11.
 
 ### Usage
 
@@ -96,7 +98,8 @@ Currently need to compile from rust src.
 
 # Known issues
 
-- browsers (e.g. Chrome) may complain after download that they could not check for viruses. This is due to the fact that the file is deleted right once it is fully extracted.
+- browsers (e.g. Chrome) may complain after download that they could not check for viruses. This is due to the fact that
+  the file is deleted right once it is fully extracted.
 
 ### License
 

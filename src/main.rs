@@ -1,17 +1,14 @@
 use clap::Parser;
-use notify::{Watcher, RecursiveMode, Result, EventKind};
-use std::path::{Path, PathBuf};
+use notify::{EventKind, RecursiveMode, Result, Watcher};
 use std::fs;
 use std::io;
-use zip::ZipArchive;
-use walkdir::WalkDir;
-use std::thread;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
-use std::process::Command;
-use flate2::read::GzDecoder;
-use tar::Archive as TarArchive;
+use std::thread;
+use walkdir::WalkDir;
 
 mod platform;
+mod extractors;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -20,7 +17,7 @@ struct Args {
     watch_path: Option<PathBuf>,
 }
 
-fn wait_until_stable(path: &Path, attempts: usize, delay: std::time::Duration) -> io::Result<()> {
+pub(crate) fn wait_until_stable(path: &Path, attempts: usize, delay: std::time::Duration) -> io::Result<()> {
     let mut prev_len = None;
     for _ in 0..attempts {
         match fs::metadata(path) {
@@ -54,7 +51,7 @@ fn next_available_dir(base: PathBuf) -> PathBuf {
     candidate
 }
 
-fn build_dest_dir_with_extension(path: &Path) -> PathBuf {
+pub(crate) fn build_dest_dir_with_extension(path: &Path) -> PathBuf {
     let parent_dir = path.parent().unwrap_or_else(|| Path::new(""));
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let sanitized: String = file_name.chars().filter(|c| !"<>:\"/\\|?*".contains(*c)).collect();
@@ -62,41 +59,8 @@ fn build_dest_dir_with_extension(path: &Path) -> PathBuf {
 }
 
 fn unzip_file(zip_path: &Path, worker_id: usize) -> io::Result<()> {
-    let dest_dir = build_dest_dir_with_extension(zip_path);
-
-    println!("[Worker {}] Unzipping file: {} to {}", worker_id, zip_path.display(), dest_dir.display());
-
-    fs::create_dir_all(&dest_dir)?;
-
-    let file = fs::File::open(zip_path)?;
-    let mut archive = ZipArchive::new(file)?;
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        println!("[Worker {}] Extracting: {}", worker_id, file.name());
-
-        let outpath = match file.enclosed_name() {
-            Some(path) => dest_dir.join(path),
-            None => continue,
-        };
-
-        if file.name().ends_with('/') {
-            fs::create_dir_all(&outpath)?;
-            continue;
-        }
-
-        if let Some(p) = outpath.parent() {
-            if !p.exists() {
-                fs::create_dir_all(p)?;
-            }
-        }
-
-        let mut outfile = fs::File::create(&outpath)?;
-        io::copy(&mut file, &mut outfile)?;
-    }
-
-    println!("[Worker {}] Successfully unzipped {}", worker_id, zip_path.display());
-    Ok(())
+    use crate::extractors::{zip::ZipExtractor, ArchiveExtractor};
+    ZipExtractor.extract(zip_path, worker_id)
 }
 
 fn is_temp_file_name(name: &str) -> bool {
@@ -109,11 +73,14 @@ fn process_file(path: &Path, worker_id: usize) {
         if is_temp_file_name(name) { return; }
     }
     if let Err(e) = wait_until_stable(path, 5, std::time::Duration::from_millis(300)) {
-            eprintln!("[Worker {}] Skipping {} due to stability check error: {}", worker_id, path.display(), e);
-            return;
+        eprintln!("[Worker {}] Skipping {} due to stability check error: {}", worker_id, path.display(), e);
+        return;
     }
     let ext = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
-    let ext = match ext { Some(e) => e, None => return };
+    let ext = match ext {
+        Some(e) => e,
+        None => return
+    };
 
     match ext.as_str() {
         "zip" => {
@@ -156,92 +123,18 @@ fn process_file(path: &Path, worker_id: usize) {
 }
 
 fn untar_or_gz(path: &Path, worker_id: usize) -> io::Result<()> {
-    let dest_dir = build_dest_dir_with_extension(path);
-    fs::create_dir_all(&dest_dir)?;
-
-    let file = fs::File::open(path)?;
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") || file_name.ends_with(".taz") {
-        let gz = GzDecoder::new(file);
-        let mut tar = TarArchive::new(gz);
-        tar.unpack(&dest_dir)?;
-    } else if file_name.ends_with(".tar") {
-        let mut tar = TarArchive::new(file);
-        tar.unpack(&dest_dir)?;
-    } else if file_name.ends_with(".gz") {
-        let mut gz = GzDecoder::new(file);
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let out_file_path = dest_dir.join(stem);
-        let mut out = fs::File::create(out_file_path)?;
-        io::copy(&mut gz, &mut out)?;
-    }
-
-    println!("[Worker {}] Extracted tar/gz {}", worker_id, path.display());
-    Ok(())
+    use crate::extractors::{targz::TarGzExtractor, ArchiveExtractor};
+    TarGzExtractor.extract(path, worker_id)
 }
 
 fn extract_7z(path: &Path, worker_id: usize) -> io::Result<()> {
-    let dest_dir = build_dest_dir_with_extension(path);
-    fs::create_dir_all(&dest_dir)?;
-
-    wait_until_stable(path, 5, std::time::Duration::from_millis(300))?;
-
-    let mut sz = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-    sz.for_each_entries(|entry, mut reader| {
-            let name = entry.name();
-            let out = dest_dir.join(name);
-            if !out.starts_with(&dest_dir) { return Err(io::Error::new(io::ErrorKind::Other, "Invalid entry path").into()); }
-            if entry.is_directory() {
-                let _ = fs::create_dir_all(&out);
-                return Ok(true);
-            }
-            if let Some(p) = out.parent() { let _ = fs::create_dir_all(p); }
-            if out.exists() {
-                if let Ok(perms) = fs::metadata(&out).and_then(|m| Ok(m.permissions())) {
-                    if perms.readonly() {
-                        let mut p = perms;
-                        p.set_readonly(false);
-                        let _ = fs::set_permissions(&out, p);
-                    }
-                }
-            }
-            let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).open(&out)?;
-            io::copy(&mut reader, &mut f)?;
-            Ok(true)
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-    println!("[Worker {}] Extracted 7z {}", worker_id, path.display());
-    Ok(())
+    use crate::extractors::{sevenz::SevenZExtractor, ArchiveExtractor};
+    SevenZExtractor.extract(path, worker_id)
 }
 
 fn extract_rar(path: &Path, worker_id: usize) -> io::Result<()> {
-    let dest_dir = build_dest_dir_with_extension(path);
-    fs::create_dir_all(&dest_dir)?;
-
-    let output = Command::new("7z")
-        .arg("x")
-        .arg("-y")
-        .arg(format!("-o{}", dest_dir.display()))
-        .arg(path)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            println!("[Worker {}] Extracted rar {} via 7z", worker_id, path.display());
-            Ok(())
-        }
-        Ok(out) => {
-            eprintln!("[Worker {}] 7z failed for {}: exit {}", worker_id, path.display(), out.status);
-            Err(io::Error::new(io::ErrorKind::Other, "7z extraction failed"))
-        }
-        Err(e) => {
-            eprintln!("[Worker {}] 7z not available or failed to launch: {}", worker_id, e);
-            Err(e)
-        }
-    }
+    use crate::extractors::{rar::RarExtractor, ArchiveExtractor};
+    RarExtractor.extract(path, worker_id)
 }
 
 #[cfg(test)]
@@ -249,7 +142,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn temp_dir() -> std::path::PathBuf {
+    fn temp_dir() -> PathBuf {
         let mut d = std::env::temp_dir();
         d.push(format!("unzipper_test_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&d).unwrap();
@@ -405,7 +298,7 @@ fn main() -> Result<()> {
     println!("[Main] Target directory set to: {}", dir_to_watch.display());
     if !dir_to_watch.exists() {
         eprintln!("[Main] Error: Watch directory does not exist.");
-        return Ok(())
+        return Ok(());
     }
 
 
@@ -435,11 +328,12 @@ fn main() -> Result<()> {
         let path = entry.path();
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
-                match ext.as_str() { "zip" | "rar" | "7z" | "tar" | "gz" => {
-                    println!("[Main] Found existing archive: {}. Sending to worker.", path.display());
-                    tx.send(path.to_path_buf()).expect("Failed to send path to worker thread");
-                }
-                _ => {}
+                match ext.as_str() {
+                    "zip" | "rar" | "7z" | "tar" | "gz" => {
+                        println!("[Main] Found existing archive: {}. Sending to worker.", path.display());
+                        tx.send(path.to_path_buf()).expect("Failed to send path to worker thread");
+                    }
+                    _ => {}
                 }
             }
         }
@@ -452,11 +346,12 @@ fn main() -> Result<()> {
                 for path in event.paths {
                     if path.is_file() {
                         if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
-                            match ext.as_str() { "zip" | "rar" | "7z" | "tar" | "gz" => {
-                                println!("[Main] Detected file event for: {}. Sending to worker.", path.display());
-                                watcher_tx.send(path).expect("Failed to send path to worker thread");
-                            }
-                            _ => {}
+                            match ext.as_str() {
+                                "zip" | "rar" | "7z" | "tar" | "gz" => {
+                                    println!("[Main] Detected file event for: {}. Sending to worker.", path.display());
+                                    watcher_tx.send(path).expect("Failed to send path to worker thread");
+                                }
+                                _ => {}
                             }
                         }
                     }
