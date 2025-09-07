@@ -91,9 +91,8 @@ Currently need to compile from rust src.
 
 ### TODO
 
-- provide exe
 - provide background service with autostart
-- maybe delete deletion of file
+- maybe delay deletion of file
 
 # Known issues
 
