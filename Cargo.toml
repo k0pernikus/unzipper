@@ -8,3 +8,6 @@ notify = "5.0.0"
 walkdir = "2.3.2"
 zip = "0.6.2"
 clap = { version = "4.5.4", features = ["derive"] }
+tar = "0.4"
+flate2 = "1.0"
+sevenz-rust = "0.5"
