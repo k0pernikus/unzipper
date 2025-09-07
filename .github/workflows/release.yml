@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v1.0.0). If empty, uses the ref when manually dispatched from a tag).'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Windows binary and create GitHub Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Verify artifact exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "target/release/unzipper.exe")) {
+            Write-Error "target/release/unzipper.exe not found after build"
+          }
+
+      - name: Determine tag and release name
+        id: vars
+        shell: pwsh
+        run: |
+          $ref = '${{ github.ref }}'
+          $inputTag = '${{ github.event.inputs.tag }}'
+          if ($inputTag -and $inputTag.Trim() -ne '') {
+            $tag = $inputTag.Trim()
+          } elseif ($ref -like 'refs/tags/*') {
+            $tag = $ref.Replace('refs/tags/','')
+          } else {
+            # fallback for manual runs from branches: create a prerelease with timestamp
+            $tag = "manual-${{ github.run_id }}"
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          echo "name=unzipper-$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.name }}
+          draft: false
+          prerelease: ${{ startsWith(steps.vars.outputs.tag, 'manual-') }}
+          generate_release_notes: true
+          files: |
+            target/release/unzipper.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
