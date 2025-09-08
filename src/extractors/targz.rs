@@ -31,6 +31,7 @@ impl ArchiveExtractor for TarGzExtractor {
             }
         }
         log_done(worker_id, path, "tar/gz");
+        if let Some(temp) = temp_renamed { let _ = fs::remove_file(temp); }
         Ok(())
     }
 }

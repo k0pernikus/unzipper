@@ -43,6 +43,7 @@ impl ArchiveExtractor for SevenZExtractor {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         }
         log_done(worker_id, path, "7z");
+        if let Some(temp) = temp_renamed { let _ = fs::remove_file(temp); }
         Ok(())
     }
 }

@@ -3,20 +3,20 @@ use std::io;
 use std::path::Path;
 use zip::ZipArchive;
 
-use crate::extractors::{ArchiveExtractor, log_extracting, log_start, log_done};
+use crate::extractors::ArchiveExtractor;
 
 pub struct ZipExtractor;
 
 impl ArchiveExtractor for ZipExtractor {
     fn extract(&self, zip_path: &Path, worker_id: usize) -> io::Result<()> {
         let (dest_dir, temp_renamed) = crate::prepare_dest_dir(zip_path)?;
-        log_start(worker_id, zip_path, &dest_dir, "zip");
+        println!("[Worker {}] Unzipping file: {} to {}", worker_id, zip_path.display(), dest_dir.display());
         {
             let file = fs::File::open(temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(zip_path))?;
             let mut archive = ZipArchive::new(file)?;
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
-                log_extracting(worker_id, file.name());
+                println!("[Worker {}] Extracting: {}", worker_id, file.name());
                 let outpath = match file.enclosed_name() {
                     Some(path) => dest_dir.join(path),
                     None => continue
@@ -30,7 +30,11 @@ impl ArchiveExtractor for ZipExtractor {
                 io::copy(&mut file, &mut outfile)?;
             }
         }
-        log_done(worker_id, zip_path, "zip");
+        // Restore original file name if we temporarily moved it.
+        if let Some(tmp) = temp_renamed {
+            let _ = fs::rename(&tmp, zip_path);
+        }
+        println!("[Worker {}] Successfully unzipped {}", worker_id, zip_path.display());
         Ok(())
     }
 }

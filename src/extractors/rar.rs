@@ -20,6 +20,7 @@ impl ArchiveExtractor for RarExtractor {
         match output {
             Ok(out) if out.status.success() => {
                 log_done(worker_id, path, "rar");
+                if let Some(temp) = temp_renamed { let _ = std::fs::remove_file(temp); }
                 Ok(())
             }
             Ok(out) => {
