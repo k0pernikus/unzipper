@@ -16,8 +16,24 @@ permissions:
 
 jobs:
   build-and-release:
-    name: Build Windows binary and create GitHub Release
-    runs-on: windows-latest
+    name: Build and create GitHub Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: unzipper-linux
+            platform_binary: unzipper
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: unzipper-macos
+            platform_binary: unzipper
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: unzipper-windows.exe
+            platform_binary: unzipper.exe
 
     steps:
       - name: Checkout
@@ -25,6 +41,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -38,14 +56,13 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Verify artifact exists
-        shell: pwsh
+      - name: Rename and prepare artifact
+        shell: bash
         run: |
-          if (-not (Test-Path "target/release/unzipper.exe")) {
-            Write-Error "target/release/unzipper.exe not found after build"
-          }
+          mkdir -p build
+          cp target/${{ matrix.target }}/release/${{ matrix.platform_binary }} build/${{ matrix.artifact_name }}
 
       - name: Determine tag and release name
         id: vars
@@ -74,6 +91,6 @@ jobs:
           prerelease: ${{ startsWith(steps.vars.outputs.tag, 'manual-') }}
           generate_release_notes: true
           files: |
-            target/release/unzipper.exe
+            build/${{ matrix.artifact_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
