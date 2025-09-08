@@ -1,26 +1,24 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-
 use crate::extractors::{ArchiveExtractor, log_extracting, log_start, log_done};
 
 pub struct SevenZExtractor;
 
 impl ArchiveExtractor for SevenZExtractor {
-    fn extract(&self, path: &Path, worker_id: usize) -> io::Result<()> {
-        let (dest_dir, temp_renamed) = crate::prepare_dest_dir(path)?;
+    fn extract(&self, path: &Path, dest: &Path, worker_id: usize) -> io::Result<()> {
         crate::wait_until_stable(path, 5, std::time::Duration::from_millis(300))?;
-        log_start(worker_id, path, &dest_dir, "7z");
+        log_start(worker_id, path, dest, "7z");
         {
             let mut sz = sevenz_rust::SevenZReader::open(
-                temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(path),
+                path,
                 sevenz_rust::Password::empty(),
             )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             sz.for_each_entries(|entry, mut reader| {
                 let name = entry.name();
-                let out = dest_dir.join(name);
-                if !out.starts_with(&dest_dir) { return Err(io::Error::new(io::ErrorKind::Other, "Invalid entry path").into()); }
+                let out = dest.join(name);
+                if !out.starts_with(dest) { return Err(io::Error::new(io::ErrorKind::Other, "Invalid entry path").into()); }
                 if entry.is_directory() {
                     let _ = fs::create_dir_all(&out);
                     return Ok(true);
@@ -40,10 +38,9 @@ impl ArchiveExtractor for SevenZExtractor {
                 io::copy(&mut reader, &mut f)?;
                 Ok(true)
             })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         }
         log_done(worker_id, path, "7z");
-        if let Some(temp) = temp_renamed { let _ = fs::remove_file(temp); }
         Ok(())
     }
 }

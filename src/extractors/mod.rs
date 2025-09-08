@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 
 pub trait ArchiveExtractor {
-    fn extract(&self, path: &Path, worker_id: usize) -> io::Result<()>;
+    fn extract(&self, path: &Path, dest: &Path, worker_id: usize) -> io::Result<()>;
 }
 
 #[inline]

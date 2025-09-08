@@ -7,20 +7,17 @@ use crate::extractors::{ArchiveExtractor, log_start, log_done, log_error_status,
 pub struct RarExtractor;
 
 impl ArchiveExtractor for RarExtractor {
-    fn extract(&self, path: &Path, worker_id: usize) -> io::Result<()> {
-        let (dest_dir, temp_renamed) = crate::prepare_dest_dir(path)?;
-        let archive_arg: &Path = temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(path);
-        log_start(worker_id, path, &dest_dir, "rar");
+    fn extract(&self, path: &Path, dest: &Path, worker_id: usize) -> io::Result<()> {
+        log_start(worker_id, path, dest, "rar");
         let output = Command::new("7z")
             .arg("x")
             .arg("-y")
-            .arg(format!("-o{}", dest_dir.display()))
-            .arg(archive_arg)
+            .arg(format!("-o{}", dest.display()))
+            .arg(path)
             .output();
         match output {
             Ok(out) if out.status.success() => {
                 log_done(worker_id, path, "rar");
-                if let Some(temp) = temp_renamed { let _ = std::fs::remove_file(temp); }
                 Ok(())
             }
             Ok(out) => {

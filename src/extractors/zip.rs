@@ -2,23 +2,21 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use zip::ZipArchive;
-
 use crate::extractors::ArchiveExtractor;
 
 pub struct ZipExtractor;
 
 impl ArchiveExtractor for ZipExtractor {
-    fn extract(&self, zip_path: &Path, worker_id: usize) -> io::Result<()> {
-        let (dest_dir, temp_renamed) = crate::prepare_dest_dir(zip_path)?;
-        println!("[Worker {}] Unzipping file: {} to {}", worker_id, zip_path.display(), dest_dir.display());
+    fn extract(&self, path: &Path, dest: &Path, worker_id: usize) -> io::Result<()> {
+        println!("[Worker {}] Unzipping file: {} to {}", worker_id, path.display(), dest.display());
         {
-            let file = fs::File::open(temp_renamed.as_ref().map(|p| p.as_path()).unwrap_or(zip_path))?;
+            let file = fs::File::open(path)?;
             let mut archive = ZipArchive::new(file)?;
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 println!("[Worker {}] Extracting: {}", worker_id, file.name());
                 let outpath = match file.enclosed_name() {
-                    Some(path) => dest_dir.join(path),
+                    Some(path) => dest.join(path),
                     None => continue
                 };
                 if file.name().ends_with('/') {
@@ -30,11 +28,7 @@ impl ArchiveExtractor for ZipExtractor {
                 io::copy(&mut file, &mut outfile)?;
             }
         }
-        // Restore original file name if we temporarily moved it.
-        if let Some(tmp) = temp_renamed {
-            let _ = fs::rename(&tmp, zip_path);
-        }
-        println!("[Worker {}] Successfully unzipped {}", worker_id, zip_path.display());
+        println!("[Worker {}] Successfully unzipped {}", worker_id, path.display());
         Ok(())
     }
 }
